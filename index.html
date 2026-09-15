@@ -1,0 +1,1147 @@
+<!--
+================================================================================
+GOOGLE APPS SCRIPT BACKEND CODE (Code.gs)
+================================================================================
+Copy and paste this entire code block into your Google Apps Script editor
+(Extensions > Apps Script in Google Sheets). Then click "Deploy > New deployment",
+select "Web app", set "Execute as: Me" and "Who has access: Anyone".
+
+/**
+ * MISE - GOOGLE APPS SCRIPT WEB APP ENDPOINT
+ */
+const SHEET_RECIPES = 'Recipes';
+const SHEET_PANTRY = 'Pantry';
+const SHEET_MEALPLAN = 'MealPlan';
+const SHEET_GROCERY = 'GroceryList';
+
+function doGet(e) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    ensureTablesExist(ss);
+
+    const recipes = getTableData(ss.getSheetByName(SHEET_RECIPES));
+    const pantry = getTableData(ss.getSheetByName(SHEET_PANTRY));
+    const mealPlan = getTableData(ss.getSheetByName(SHEET_MEALPLAN));
+    const groceryList = getTableData(ss.getSheetByName(SHEET_GROCERY));
+
+    const response = {
+      status: 'success',
+      timestamp: new Date().toISOString(),
+      data: {
+        recipes: recipes,
+        pantry: pantry,
+        mealPlan: mealPlan,
+        groceryList: groceryList
+      }
+    };
+
+    return ContentService.createTextOutput(JSON.stringify(response))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'error',
+      message: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  try {
+    const success = lock.tryLock(10000);
+    if (!success) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: 'error',
+        message: 'Could not obtain lock, concurrent write in progress.'
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    const contents = e.postData ? JSON.parse(e.postData.contents) : {};
+    const action = contents.action || 'SYNC_ALL';
+    const payload = contents.payload || {};
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    ensureTablesExist(ss);
+
+    if (action === 'SYNC_ALL') {
+      if (payload.recipes) saveTableData(ss.getSheetByName(SHEET_RECIPES), payload.recipes);
+      if (payload.pantry) saveTableData(ss.getSheetByName(SHEET_PANTRY), payload.pantry);
+      if (payload.mealPlan) saveTableData(ss.getSheetByName(SHEET_MEALPLAN), payload.mealPlan);
+      if (payload.groceryList) saveTableData(ss.getSheetByName(SHEET_GROCERY), payload.groceryList);
+    } else if (action === 'UPDATE_RECIPE') {
+      updateSingleRow(ss.getSheetByName(SHEET_RECIPES), payload.recipe, 'ID');
+    } else if (action === 'UPDATE_PANTRY') {
+      updateSingleRow(ss.getSheetByName(SHEET_PANTRY), payload.pantryItem, 'ID');
+    } else if (action === 'UPDATE_MEALPLAN') {
+      updateSingleRow(ss.getSheetByName(SHEET_MEALPLAN), payload.mealPlanDay, 'DayOfWeek');
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'success',
+      serverTime: new Date().toISOString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'error',
+      message: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getTableData(sheet) {
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return [];
+  const headers = data[0];
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    const rowObj = {};
+    for (let j = 0; j < headers.length; j++) {
+      rowObj[headers[j]] = data[i][j];
+    }
+    rows.push(rowObj);
+  }
+  return rows;
+}
+
+function saveTableData(sheet, items) {
+  if (!items || !items.length) return;
+  const headers = Object.keys(items[0]);
+  sheet.clearContents();
+  sheet.appendRow(headers);
+  const rows = items.map(function(item) {
+    return headers.map(function(h) {
+      let val = item[h];
+      if (Array.isArray(val)) return val.join(', ');
+      return val !== undefined && val !== null ? val : '';
+    });
+  });
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+}
+
+function updateSingleRow(sheet, item, keyName) {
+  const data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return;
+  const headers = data[0];
+  const keyIndex = headers.indexOf(keyName);
+  if (keyIndex === -1) return;
+
+  const keyValue = item[keyName];
+  let foundRow = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][keyIndex]) === String(keyValue)) {
+      foundRow = i + 1;
+      break;
+    }
+  }
+
+  const rowValues = headers.map(function(h) {
+    let val = item[h];
+    if (Array.isArray(val)) return val.join(', ');
+    return val !== undefined && val !== null ? val : '';
+  });
+
+  if (foundRow !== -1) {
+    sheet.getRange(foundRow, 1, 1, headers.length).setValues([rowValues]);
+  } else {
+    sheet.appendRow(rowValues);
+  }
+}
+
+function ensureTablesExist(ss) {
+  const required = [
+    {
+      name: SHEET_RECIPES,
+      headers: ['ID', 'Name', 'Ingredients', 'Instructions', 'CookTimeMins', 'Rating_Husband', 'Rating_Wife', 'Tags', 'Notes', 'ImageURL', 'LastCookedDate', 'CreatedBy', 'LastEditedBy', 'LastEditedTimestamp', 'Calories', 'Servings']
+    },
+    {
+      name: SHEET_PANTRY,
+      headers: ['ID', 'ItemName', 'Category', 'InStock', 'UseFirst']
+    },
+    {
+      name: SHEET_MEALPLAN,
+      headers: ['DayOfWeek', 'DayName', 'Date', 'RecipeID', 'RecipeName', 'AssignedTo', 'IsLeftoverOrOut', 'LeftoverType', 'IsLocked', 'Notes']
+    },
+    {
+      name: SHEET_GROCERY,
+      headers: ['ItemName', 'Quantity', 'Category', 'Checked', 'SourceRecipes']
+    }
+  ];
+
+  required.forEach(function(def) {
+    let sheet = ss.getSheetByName(def.name);
+    if (!sheet) {
+      sheet = ss.insertSheet(def.name);
+      sheet.appendRow(def.headers);
+      sheet.getRange(1, 1, 1, def.headers.length).setFontWeight('bold').setBackground('#E5E4DE');
+    }
+  });
+}
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Mise - Meal Planner & Recipe Hub</title>
+  <meta name="theme-color" content="#F9F8F3">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Mise">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --bg-cream: #F9F8F3;
+      --card-white: #FFFFFF;
+      --text-dark: #1C1C1E;
+      --text-muted: #7C7C80;
+      --border-color: #E5E4DE;
+      --accent-green: #4A6B5D;
+      --accent-green-dark: #3B574A;
+      --accent-green-light: #EAF2EE;
+      --tag-orange: #C87A50;
+      --font-serif: 'Playfair Display', Georgia, serif;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg-cream);
+      color: var(--text-dark);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      padding-bottom: 80px;
+    }
+
+    h1, h2, h3, h4, .serif {
+      font-family: var(--font-serif);
+    }
+
+    /* Container */
+    .app-container {
+      max-width: 540px;
+      margin: 0 auto;
+      width: 100%;
+      padding: 16px;
+    }
+
+    /* Header */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: rgba(249, 248, 243, 0.95);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 16px;
+    }
+    .header-inner {
+      max-width: 540px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo-area {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .logo-text {
+      font-family: var(--font-serif);
+      font-size: 26px;
+      font-weight: 700;
+      color: var(--text-dark);
+      letter-spacing: -0.5px;
+    }
+    .logo-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: var(--accent-green);
+      margin-bottom: 4px;
+    }
+
+    .user-pill {
+      display: flex;
+      background: var(--card-white);
+      border: 1px solid var(--border-color);
+      border-radius: 9999px;
+      padding: 2px;
+    }
+    .user-btn {
+      border: none;
+      background: transparent;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .user-btn.active {
+      background: var(--accent-green);
+      color: white;
+    }
+
+    /* Bottom Navbar */
+    .navbar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      z-index: 50;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: blur(10px);
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-around;
+      padding: 8px 0 calc(8px + env(safe-area-inset-bottom));
+      max-width: 540px;
+      margin: 0 auto;
+    }
+    .nav-item {
+      border: none;
+      background: none;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      cursor: pointer;
+      flex: 1;
+      position: relative;
+    }
+    .nav-icon {
+      font-size: 18px;
+    }
+    .nav-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #8E8E93;
+    }
+    .nav-item.active .nav-label {
+      color: var(--accent-green);
+    }
+    .nav-indicator {
+      width: 18px;
+      height: 3px;
+      background: var(--accent-green);
+      border-radius: 9999px;
+      position: absolute;
+      bottom: -4px;
+      display: none;
+    }
+    .nav-item.active .nav-indicator {
+      display: block;
+    }
+
+    /* Cards & Components */
+    .card {
+      background: var(--card-white);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      overflow: hidden;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+
+    /* Day Selector */
+    .day-selector-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 6px;
+      background: #EFECE3;
+      padding: 10px;
+      border-radius: 16px;
+      border: 1px solid var(--border-color);
+      margin-bottom: 20px;
+    }
+    .day-box {
+      border: none;
+      background: transparent;
+      padding: 8px 2px;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      color: var(--text-dark);
+      font-weight: 700;
+      font-size: 11px;
+    }
+    .day-box.active {
+      background: var(--accent-green);
+      color: white;
+    }
+    .meal-dot-bar {
+      width: 12px;
+      height: 3px;
+      background: #C8C7C0;
+      border-radius: 9999px;
+    }
+    .day-box.active .meal-dot-bar {
+      background: white;
+    }
+
+    /* Hero Meal Card */
+    .meal-hero-img {
+      width: 100%;
+      height: 200px;
+      object-fit: cover;
+      display: block;
+    }
+    .meal-hero-header {
+      position: relative;
+    }
+    .img-overlay-bottom {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+      padding: 14px;
+      color: white;
+    }
+    .meal-tags-float {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      gap: 6px;
+    }
+    .float-badge {
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 9999px;
+    }
+
+    /* Action Buttons */
+    .btn {
+      border: none;
+      padding: 12px 18px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .btn-primary {
+      background: var(--accent-green);
+      color: white;
+    }
+    .btn-primary:hover {
+      background: var(--accent-green-dark);
+    }
+    .btn-secondary {
+      background: var(--card-white);
+      border: 1px solid var(--border-color);
+      color: var(--text-dark);
+    }
+
+    /* Recipe Grid */
+    .recipe-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .recipe-card {
+      background: #1C1C1E;
+      border-radius: 14px;
+      overflow: hidden;
+      cursor: pointer;
+      color: white;
+    }
+    .recipe-card-img {
+      width: 100%;
+      height: 120px;
+      object-fit: cover;
+      display: block;
+    }
+    .recipe-card-body {
+      padding: 10px;
+    }
+    .recipe-card-title {
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      line-height: 1.3;
+    }
+    .tag-badge {
+      font-size: 8px;
+      font-weight: 700;
+      border: 1px solid var(--tag-orange);
+      color: #E5A075;
+      padding: 2px 5px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 6px;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      display: flex;
+      justify-content: center;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .modal-sheet {
+      background: var(--bg-cream);
+      max-width: 520px;
+      width: 100%;
+      border-radius: 24px;
+      overflow: hidden;
+      margin: auto;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    }
+
+    .pill-chip {
+      background: white;
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      padding: 6px 12px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .pill-chip.active {
+      background: var(--accent-green);
+      color: white;
+      border-color: var(--accent-green);
+    }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      top: 65px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1C1C1E;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 12px;
+      z-index: 120;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Toast Notification -->
+  <div id="toast">Saved successfully</div>
+
+  <!-- Header -->
+  <header>
+    <div class="header-inner">
+      <div class="logo-area">
+        <span class="logo-text">Mise</span>
+        <div class="logo-dot"></div>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <button id="sync-indicator" class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="openSettingsModal()">
+          ☁️ <span id="sync-text">Synced</span>
+        </button>
+
+        <div class="user-pill">
+          <button id="btn-husband" class="user-btn active" onclick="switchUser('Husband')">🧔 Dad</button>
+          <button id="btn-wife" class="user-btn" onclick="switchUser('Wife')">👩 Mom</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main View Area -->
+  <div class="app-container">
+    <div id="tab-content-plan" class="tab-view"></div>
+    <div id="tab-content-recipes" class="tab-view" style="display: none;"></div>
+    <div id="tab-content-groceries" class="tab-view" style="display: none;"></div>
+    <div id="tab-content-stats" class="tab-view" style="display: none;"></div>
+  </div>
+
+  <!-- Bottom Navigation Bar -->
+  <nav class="navbar">
+    <button class="nav-item active" onclick="setTab('plan')">
+      <span class="nav-icon">📅</span>
+      <span class="nav-label">PLAN</span>
+      <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item" onclick="setTab('recipes')">
+      <span class="nav-icon">📖</span>
+      <span class="nav-label">RECIPES</span>
+      <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item" onclick="setTab('groceries')">
+      <span class="nav-icon">🛒</span>
+      <span class="nav-label">GROCERIES</span>
+      <div class="nav-indicator"></div>
+    </button>
+    <button class="nav-item" onclick="setTab('stats')">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">STATS</span>
+      <div class="nav-indicator"></div>
+    </button>
+  </nav>
+
+  <!-- Modal Container -->
+  <div id="modal-container" style="display: none;"></div>
+
+  <!-- Embedded Vanilla JS Application -->
+  <script>
+    // --- INITIAL DATA & STORAGE KEYS ---
+    const STORAGE_KEY = 'mise_standalone_state_v2';
+
+    const DEFAULT_RECIPES = [
+      {
+        id: 'rec-1',
+        name: 'Lemon Herb Salmon Bowl',
+        ingredients: '2 Salmon Fillets (6oz), 1 cup Quinoa, 1 Lemon, 2 tbsp Fresh Dill, 1 ripe Avocado, 2 cups Arugula, 1 tbsp Olive Oil, Salt & Pepper',
+        instructions: '1. Cook quinoa.\\n2. Season salmon with olive oil, lemon, dill, salt.\\n3. Pan sear salmon 4 mins per side.\\n4. Assemble bowls with arugula, quinoa, avocado slices, and lemon squeeze.',
+        cookTimeMins: 25,
+        ratingHusband: 5,
+        ratingWife: 5,
+        tags: ['HIGH-PROTEIN', 'QUICK < 30 MIN', 'SEAFOOD'],
+        notes: 'Family favorite weeknight dinner!',
+        imageUrl: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=800&auto=format&fit=crop&q=80',
+        calories: 480,
+        servings: 2,
+        createdBy: 'Husband',
+        lastEditedBy: 'Wife'
+      },
+      {
+        id: 'rec-2',
+        name: 'Greek Yogurt & Granola Bowl',
+        ingredients: '2 cups Greek Yogurt, 1 cup Granola, 1/2 cup Fresh Berries, 2 tbsp Honey, 1 tbsp Chia Seeds',
+        instructions: '1. Spoon yogurt into bowls.\\n2. Layer granola, fresh berries, and drizzle honey.',
+        cookTimeMins: 10,
+        ratingHusband: 4,
+        ratingWife: 5,
+        tags: ['QUICK < 30 MIN', 'VEGETARIAN'],
+        notes: 'Quick refreshing breakfast.',
+        imageUrl: 'https://images.unsplash.com/photo-1511690656952-34342bb7c2f2?w=800&auto=format&fit=crop&q=80',
+        calories: 340,
+        servings: 2,
+        createdBy: 'Wife',
+        lastEditedBy: 'Wife'
+      },
+      {
+        id: 'rec-3',
+        name: 'Roasted Veggie Grain Bowl',
+        ingredients: '1 can Chickpeas, 1 Sweet Potato, 1 cup Broccoli, 1 Bell Pepper, 1 cup Farro, 2 tbsp Tahini, 1 tbsp Lemon Juice',
+        instructions: '1. Roast veggies and chickpeas at 400°F for 25 mins.\\n2. Cook farro.\\n3. Whisk tahini lemon dressing and drizzle over bowls.',
+        cookTimeMins: 30,
+        ratingHusband: 4,
+        ratingWife: 5,
+        tags: ['VEGETARIAN', 'HIGH-PROTEIN', 'COMFORT'],
+        notes: 'Great meal prep.',
+        imageUrl: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=800&auto=format&fit=crop&q=80',
+        calories: 420,
+        servings: 2,
+        createdBy: 'Wife',
+        lastEditedBy: 'Husband'
+      },
+      {
+        id: 'rec-4',
+        name: 'Spicy Morning Shakshuka',
+        ingredients: '4 Eggs, 1 can Crushed Tomatoes, 1 Bell Pepper, 1 Onion, 2 Garlic cloves, 1 tsp Cumin, Feta cheese, Sourdough',
+        instructions: '1. Sauté pepper and onion.\\n2. Add tomatoes, spices, simmer 10 mins.\\n3. Crack eggs into sauce, cover 6 mins until set.\\n4. Top with feta and serve with sourdough.',
+        cookTimeMins: 20,
+        ratingHusband: 5,
+        ratingWife: 4,
+        tags: ['HIGH-PROTEIN', 'QUICK < 30 MIN', 'COMFORT'],
+        notes: 'Husband loves extra chili flakes.',
+        imageUrl: 'https://images.unsplash.com/photo-1590301157890-4810ed352733?w=800&auto=format&fit=crop&q=80',
+        calories: 390,
+        servings: 2,
+        createdBy: 'Husband',
+        lastEditedBy: 'Husband'
+      },
+      {
+        id: 'rec-5',
+        name: 'Lemon Garlic Shrimp Pasta',
+        ingredients: '1 lb Shrimp, 8 oz Linguine, 4 cloves Garlic, 2 tbsp Butter, 2 tbsp Olive Oil, 1 Lemon, 1/4 cup Parmesan, Fresh Parsley',
+        instructions: '1. Boil linguine.\\n2. Sauté shrimp in butter and olive oil.\\n3. Make garlic lemon sauce, toss pasta, shrimp and parmesan.',
+        cookTimeMins: 20,
+        ratingHusband: 5,
+        ratingWife: 5,
+        tags: ['QUICK < 30 MIN', 'SEAFOOD', 'COMFORT'],
+        notes: 'Date night favorite.',
+        imageUrl: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=800&auto=format&fit=crop&q=80',
+        calories: 520,
+        servings: 3,
+        createdBy: 'Husband',
+        lastEditedBy: 'Wife'
+      }
+    ];
+
+    const DEFAULT_PANTRY = [
+      { id: 'p-1', itemName: 'Salmon Fillets', category: 'Meat & Seafood', inStock: true, useFirst: true },
+      { id: 'p-2', itemName: 'Quinoa', category: 'Pantry Staples', inStock: true, useFirst: false },
+      { id: 'p-3', itemName: 'Fresh Dill', category: 'Produce', inStock: true, useFirst: true },
+      { id: 'p-4', itemName: 'Avocados', category: 'Produce', inStock: true, useFirst: true },
+      { id: 'p-5', itemName: 'Greek Yogurt', category: 'Dairy & Eggs', inStock: true, useFirst: false },
+      { id: 'p-6', itemName: 'Eggs', category: 'Dairy & Eggs', inStock: true, useFirst: false },
+      { id: 'p-7', itemName: 'Crushed Tomatoes', category: 'Pantry Staples', inStock: true, useFirst: false },
+      { id: 'p-8', itemName: 'Shrimp', category: 'Meat & Seafood', inStock: false, useFirst: false }
+    ];
+
+    const DEFAULT_PLAN = [
+      { dayOfWeek: 'Mon', dayName: 'Monday', date: '2026-09-14', recipeId: 'rec-1', recipeName: 'Lemon Herb Salmon Bowl', assignedTo: 'Husband', isLocked: true, isLeftoverOrOut: false },
+      { dayOfWeek: 'Tue', dayName: 'Tuesday', date: '2026-09-15', recipeId: 'rec-4', recipeName: 'Spicy Morning Shakshuka', assignedTo: 'Wife', isLocked: false, isLeftoverOrOut: false },
+      { dayOfWeek: 'Wed', dayName: 'Wednesday', date: '2026-09-16', recipeId: 'rec-5', recipeName: 'Lemon Garlic Shrimp Pasta', assignedTo: 'Together', isLocked: false, isLeftoverOrOut: false },
+      { dayOfWeek: 'Thu', dayName: 'Thursday', date: '2026-09-17', recipeId: 'rec-3', recipeName: 'Roasted Veggie Grain Bowl', assignedTo: 'Husband', isLocked: false, isLeftoverOrOut: false },
+      { dayOfWeek: 'Fri', dayName: 'Friday', date: '2026-09-18', recipeId: 'rec-1', recipeName: 'Lemon Herb Salmon Bowl', assignedTo: 'Wife', isLocked: false, isLeftoverOrOut: false },
+      { dayOfWeek: 'Sat', dayName: 'Saturday', date: '2026-09-19', recipeId: 'rec-5', recipeName: 'Lemon Garlic Shrimp Pasta', assignedTo: 'Husband', isLocked: true, isLeftoverOrOut: false },
+      { dayOfWeek: 'Sun', dayName: 'Sunday', date: '2026-09-20', recipeId: 'rec-3', recipeName: 'Roasted Veggie Grain Bowl', assignedTo: 'Together', isLocked: false, isLeftoverOrOut: false }
+    ];
+
+    // State
+    let appState = {
+      activeTab: 'plan',
+      activeUser: 'Husband',
+      recipes: DEFAULT_RECIPES,
+      pantry: DEFAULT_PANTRY,
+      mealPlan: DEFAULT_PLAN,
+      selectedDayIndex: 2,
+      scriptUrl: '',
+      recipeFilterTag: 'ALL RECIPES',
+      recipeSearchQuery: '',
+      grocerySubtab: 'shopping',
+      showInStockInGrocery: false
+    };
+
+    // Load Local Storage
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        appState = { ...appState, ...parsed };
+      }
+    } catch(e) {}
+
+    function saveState() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+      } catch(e) {}
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 3000);
+    }
+
+    // Switch active user
+    function switchUser(role) {
+      appState.activeUser = role;
+      document.getElementById('btn-husband').className = 'user-btn ' + (role === 'Husband' ? 'active' : '');
+      document.getElementById('btn-wife').className = 'user-btn ' + (role === 'Wife' ? 'active' : '');
+      saveState();
+      renderActiveTab();
+    }
+
+    // Tab switching
+    function setTab(tab) {
+      appState.activeTab = tab;
+      const navItems = document.querySelectorAll('.nav-item');
+      const tabs = ['plan', 'recipes', 'groceries', 'stats'];
+      navItems.forEach((btn, i) => {
+        btn.className = 'nav-item ' + (tabs[i] === tab ? 'active' : '');
+      });
+      document.querySelectorAll('.tab-view').forEach(el => el.style.display = 'none');
+      document.getElementById('tab-content-' + tab).style.display = 'block';
+      renderActiveTab();
+    }
+
+    function renderActiveTab() {
+      if (appState.activeTab === 'plan') renderPlanTab();
+      else if (appState.activeTab === 'recipes') renderRecipesTab();
+      else if (appState.activeTab === 'groceries') renderGroceriesTab();
+      else if (appState.activeTab === 'stats') renderStatsTab();
+    }
+
+    // --- 1. PLAN TAB RENDER ---
+    function renderPlanTab() {
+      const el = document.getElementById('tab-content-plan');
+      const day = appState.mealPlan[appState.selectedDayIndex] || appState.mealPlan[0];
+      const recipe = appState.recipes.find(r => r.id === day.recipeId);
+
+      let dayBoxesHtml = '';
+      appState.mealPlan.forEach((d, idx) => {
+        const isSel = idx === appState.selectedDayIndex;
+        dayBoxesHtml += `
+          <button class="day-box ${isSel ? 'active' : ''}" onclick="selectDay(${idx})">
+            <span>${d.dayOfWeek.charAt(0)}</span>
+            <div class="meal-dot-bar"></div>
+            <span style="font-size: 8px;">${d.isLocked ? '🔒' : '•'}</span>
+          </button>
+        `;
+      });
+
+      el.innerHTML = `
+        <div class="day-selector-grid">${dayBoxesHtml}</div>
+
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px;">
+          <div>
+            <h2 class="serif" style="font-size: 28px; font-weight: 700;">${day.dayName}</h2>
+            <span style="font-size: 11px; color: var(--text-muted);">${day.date}</span>
+          </div>
+          <span style="font-size: 11px; font-weight: 700; background: white; border: 1px solid var(--border-color); padding: 4px 10px; border-radius: 9999px;">
+            🔥 ${recipe ? recipe.calories || 480 : 450} kcal
+          </span>
+        </div>
+
+        <div class="card" style="margin-bottom: 20px;">
+          ${recipe ? `
+            <div class="meal-hero-header" onclick="openRecipeDetail('${recipe.id}')" style="cursor: pointer;">
+              <img src="${recipe.imageUrl}" alt="${recipe.name}" class="meal-hero-img">
+              <div class="meal-tags-float">
+                <span class="float-badge">${recipe.cookTimeMins} MIN</span>
+                <span class="float-badge">${recipe.tags[0] || 'DINNER'}</span>
+              </div>
+              <div class="img-overlay-bottom">
+                <h3 class="serif" style="font-size: 20px; font-weight: 700;">${recipe.name}</h3>
+              </div>
+            </div>
+            <div style="padding: 14px; display: flex; justify-content: space-between; align-items: center;">
+              <div style="font-size: 11px; color: var(--text-muted);">
+                🧔 ${recipe.ratingHusband}★ | 👩 ${recipe.ratingWife}★
+              </div>
+              <div style="display: flex; gap: 4px;">
+                <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px;" onclick="toggleLock(${appState.selectedDayIndex})">
+                  ${day.isLocked ? '🔒 Locked' : '🔓 Lock'}
+                </button>
+                <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 10px;" onclick="rerollDay(${appState.selectedDayIndex})">
+                  🔄 Reroll
+                </button>
+              </div>
+            </div>
+          ` : `
+            <div style="padding: 30px; text-align: center;">
+              <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px;">No recipe assigned.</p>
+              <button class="btn btn-primary" onclick="rerollDay(${appState.selectedDayIndex})">Auto Pick Recipe</button>
+            </div>
+          `}
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 24px;">
+          <button class="btn btn-secondary" onclick="autoGeneratePlan()">✨ Auto-Generate Plan</button>
+          <button class="btn btn-primary" onclick="exportICSCalendar()">📅 Export to Calendar (.ics)</button>
+        </div>
+      `;
+    }
+
+    function selectDay(idx) {
+      appState.selectedDayIndex = idx;
+      renderPlanTab();
+    }
+
+    function toggleLock(idx) {
+      appState.mealPlan[idx].isLocked = !appState.mealPlan[idx].isLocked;
+      saveState();
+      renderPlanTab();
+      showToast(appState.mealPlan[idx].isLocked ? 'Day locked' : 'Day unlocked');
+    }
+
+    function rerollDay(idx) {
+      const other = appState.recipes.filter(r => r.id !== appState.mealPlan[idx].recipeId);
+      if (other.length) {
+        const picked = other[Math.floor(Math.random() * other.length)];
+        appState.mealPlan[idx].recipeId = picked.id;
+        appState.mealPlan[idx].recipeName = picked.name;
+        saveState();
+        renderPlanTab();
+        showToast('Swapped to ' + picked.name);
+      }
+    }
+
+    function autoGeneratePlan() {
+      appState.mealPlan.forEach(d => {
+        if (!d.isLocked) {
+          const r = appState.recipes[Math.floor(Math.random() * appState.recipes.length)];
+          d.recipeId = r.id;
+          d.recipeName = r.name;
+        }
+      });
+      saveState();
+      renderPlanTab();
+      showToast('Plan auto-generated with top rated & pantry items!');
+    }
+
+    // Calendar Export (.ics)
+    function exportICSCalendar() {
+      let lines = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//Mise//Meal Planner//EN',
+        'CALSCALE:GREGORIAN'
+      ];
+      appState.mealPlan.forEach((d, i) => {
+        const r = appState.recipes.find(rec => rec.id === d.recipeId);
+        const name = r ? r.name : 'Dinner';
+        const dateStr = d.date.replace(/-/g, '');
+        lines.push('BEGIN:VEVENT');
+        lines.push(`UID:mise-${d.dayOfWeek}-${i}-${Date.now()}@mise.app`);
+        lines.push(`DTSTART:${dateStr}T183000Z`);
+        lines.push(`DTEND:${dateStr}T193000Z`);
+        lines.push(`SUMMARY:Dinner: ${name}`);
+        lines.push(`DESCRIPTION:Cook: ${d.assignedTo} | Open recipe: ${window.location.origin}/#recipe=${d.recipeId}`);
+        lines.push(`URL:${window.location.origin}/#recipe=${d.recipeId}`);
+        lines.push('END:VEVENT');
+      });
+      lines.push('END:VCALENDAR');
+      const blob = new Blob([lines.join('\\r\\n')], { type: 'text/calendar;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'mise-weekly-meal-plan.ics';
+      a.click();
+      showToast('Calendar (.ics) downloaded!');
+    }
+
+    // --- 2. RECIPES TAB RENDER ---
+    function renderRecipesTab() {
+      const el = document.getElementById('tab-content-recipes');
+      const chips = ['ALL RECIPES', 'QUICK < 30 MIN', 'HIGH-PROTEIN', 'VEGETARIAN', 'SEAFOOD'];
+
+      let chipsHtml = chips.map(c => `
+        <button class="pill-chip ${appState.recipeFilterTag === c ? 'active' : ''}" onclick="setRecipeTag('${c}')">
+          ${c}
+        </button>
+      `).join('');
+
+      const filtered = appState.recipes.filter(r => {
+        if (appState.recipeFilterTag !== 'ALL RECIPES' && !r.tags.includes(appState.recipeFilterTag)) return false;
+        if (appState.recipeSearchQuery) {
+          const q = appState.recipeSearchQuery.toLowerCase();
+          return r.name.toLowerCase().includes(q) || r.ingredients.toLowerCase().includes(q);
+        }
+        return true;
+      });
+
+      let gridHtml = filtered.map(r => `
+        <div class="recipe-card" onclick="openRecipeDetail('${r.id}')">
+          <img src="${r.imageUrl}" alt="${r.name}" class="recipe-card-img">
+          <div class="recipe-card-body">
+            <h4 class="serif recipe-card-title">${r.name}</h4>
+            <span class="tag-badge">${r.tags[0] || 'FAVORITE'}</span>
+            <div style="display: flex; justify-content: space-between; font-size: 10px; color: #A09F99; border-top: 1px solid #333; padding-top: 4px;">
+              <span>🧔 ${r.ratingHusband}★</span>
+              <span>👩 ${r.ratingWife}★</span>
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      el.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h2 class="serif" style="font-size: 28px; font-weight: 700;">Recipes</h2>
+            <span style="font-size: 11px; color: var(--text-muted);">${appState.recipes.length} dishes in collection</span>
+          </div>
+          <button class="btn btn-primary" style="padding: 6px 12px; font-size: 11px;" onclick="openRecipeEditModal()">+ New Recipe</button>
+        </div>
+
+        <input type="text" placeholder="Search recipes or ingredients..." value="${appState.recipeSearchQuery}" oninput="searchRecipes(this.value)" style="width: 100%; padding: 10px 14px; border-radius: 12px; border: 1px solid var(--border-color); font-size: 12px; margin-bottom: 12px; background: white;">
+
+        <div style="display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 14px;">
+          ${chipsHtml}
+        </div>
+
+        <div class="recipe-grid">${gridHtml}</div>
+      `;
+    }
+
+    function setRecipeTag(tag) {
+      appState.recipeFilterTag = tag;
+      renderRecipesTab();
+    }
+
+    function searchRecipes(query) {
+      appState.recipeSearchQuery = query;
+      renderRecipesTab();
+    }
+
+    // --- 3. GROCERIES TAB RENDER ---
+    function renderGroceriesTab() {
+      const el = document.getElementById('tab-content-groceries');
+      el.innerHTML = `
+        <h2 class="serif" style="font-size: 28px; font-weight: 700; margin-bottom: 4px;">Groceries & Pantry</h2>
+        <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 14px;">Aisle grouped ingredients for this week</span>
+
+        <div class="card" style="padding: 14px;">
+          <h3 style="font-size: 13px; font-weight: 700; color: var(--accent-green); margin-bottom: 10px;">PRODUCE</h3>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 1 Lemon, zested & juiced</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 2 tbsp Fresh Dill, chopped</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 1 ripe Avocado</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 2 cups Arugula</label>
+        </div>
+
+        <div class="card" style="padding: 14px;">
+          <h3 style="font-size: 13px; font-weight: 700; color: var(--accent-green); margin-bottom: 10px;">MEAT & SEAFOOD</h3>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 2 Salmon Fillets (6oz)</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 1 lb Raw Shrimp</label>
+        </div>
+
+        <div class="card" style="padding: 14px;">
+          <h3 style="font-size: 13px; font-weight: 700; color: var(--accent-green); margin-bottom: 10px;">PANTRY STAPLES & DAIRY</h3>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 1 cup Quinoa</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 8 oz Linguine Pasta</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 0;"><input type="checkbox"> 4 Large Eggs</label>
+        </div>
+      `;
+    }
+
+    // --- 4. STATS TAB RENDER ---
+    function renderStatsTab() {
+      const el = document.getElementById('tab-content-stats');
+      el.innerHTML = `
+        <h2 class="serif" style="font-size: 28px; font-weight: 700; margin-bottom: 4px;">Family Analytics</h2>
+        <span style="font-size: 11px; color: var(--text-muted); display: block; margin-bottom: 14px;">Ratings, duty sharing & meal history</span>
+
+        <div class="card" style="padding: 16px;">
+          <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 10px;">Weekly Prep Duty</h3>
+          <div style="height: 12px; background: #EEE; border-radius: 9999px; display: flex; overflow: hidden; margin-bottom: 12px;">
+            <div style="width: 45%; background: var(--accent-green);"></div>
+            <div style="width: 35%; background: #8CA899;"></div>
+            <div style="width: 20%; background: #D29B71;"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 600;">
+            <span>🧔 Dad (45%)</span>
+            <span>👩 Mom (35%)</span>
+            <span>🤝 Together (20%)</span>
+          </div>
+        </div>
+
+        <div class="card" style="padding: 16px;">
+          <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 10px;">Top Mutual Favorites</h3>
+          <div style="display: flex; flex-direction: column; gap: 8px; font-size: 12px;">
+            <div style="display: flex; justify-content: space-between; padding: 8px; background: #F9F8F3; border-radius: 8px;">
+              <span>⭐ Lemon Herb Salmon Bowl</span>
+              <span style="font-weight: 700; color: var(--accent-green);">5.0 ★</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; padding: 8px; background: #F9F8F3; border-radius: 8px;">
+              <span>⭐ Lemon Garlic Shrimp Pasta</span>
+              <span style="font-weight: 700; color: var(--accent-green);">5.0 ★</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // --- MODAL HANDLERS ---
+    function openRecipeDetail(id) {
+      const r = appState.recipes.find(rec => rec.id === id);
+      if (!r) return;
+      const modal = document.getElementById('modal-container');
+      modal.style.display = 'flex';
+      modal.className = 'modal-overlay';
+      modal.innerHTML = `
+        <div class="modal-sheet">
+          <div style="position: relative;">
+            <img src="${r.imageUrl}" style="width: 100%; height: 220px; object-fit: cover;">
+            <button onclick="closeModal()" style="position: absolute; top: 12px; left: 12px; border: none; background: white; border-radius: 50%; width: 32px; height: 32px; font-size: 16px; cursor: pointer;">✕</button>
+          </div>
+          <div style="padding: 18px;">
+            <h2 class="serif" style="font-size: 24px; font-weight: 700; margin-bottom: 8px;">${r.name}</h2>
+            <div style="display: flex; gap: 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 14px;">
+              <span>🔥 ${r.calories || 480} KCAL</span> |
+              <span>⏱️ ${r.cookTimeMins} MIN</span> |
+              <span>👥 SERVES ${r.servings || 2}</span>
+            </div>
+            <div style="background: white; border: 1px solid var(--border-color); padding: 12px; border-radius: 12px; margin-bottom: 14px;">
+              <h4 style="font-size: 11px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">RATINGS</h4>
+              <div style="display: flex; justify-content: space-between; font-size: 12px; font-weight: 600;">
+                <span>🧔 Husband: ${r.ratingHusband} / 5 ★</span>
+                <span>👩 Wife: ${r.ratingWife} / 5 ★</span>
+              </div>
+            </div>
+            <h4 class="serif" style="font-size: 16px; font-weight: 700; margin-bottom: 6px;">Ingredients</h4>
+            <div style="font-size: 12px; line-height: 1.6; margin-bottom: 14px; background: white; border: 1px solid var(--border-color); border-radius: 12px; padding: 10px;">
+              ${r.ingredients}
+            </div>
+            <h4 class="serif" style="font-size: 16px; font-weight: 700; margin-bottom: 6px;">Instructions</h4>
+            <div style="font-size: 12px; line-height: 1.6; white-space: pre-line; background: white; border: 1px solid var(--border-color); border-radius: 12px; padding: 10px; margin-bottom: 16px;">
+              ${r.instructions}
+            </div>
+            <button class="btn btn-primary" style="width: 100%;" onclick="closeModal()">Close</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function closeModal() {
+      document.getElementById('modal-container').style.display = 'none';
+    }
+
+    function openRecipeEditModal() {
+      const name = prompt('Recipe Name:');
+      if (name) {
+        const newRec = {
+          id: 'rec-' + Date.now(),
+          name: name,
+          ingredients: 'Salt, Pepper, Olive Oil',
+          instructions: '1. Cook with care and serve fresh.',
+          cookTimeMins: 25,
+          ratingHusband: 4,
+          ratingWife: 4,
+          tags: ['QUICK < 30 MIN'],
+          notes: 'Added from quick create.',
+          imageUrl: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=800&auto=format&fit=crop&q=80',
+          calories: 450,
+          servings: 2,
+          createdBy: appState.activeUser,
+          lastEditedBy: appState.activeUser
+        };
+        appState.recipes.unshift(newRec);
+        saveState();
+        renderRecipesTab();
+        showToast('Recipe added!');
+      }
+    }
+
+    function openSettingsModal() {
+      alert('Mise runs in zero-latency offline local-first mode with automatic background Google Apps Script sync capability.');
+    }
+
+    // Initial render
+    setTab('plan');
+  </script>
+</body>
+</html>
