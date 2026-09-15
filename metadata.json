@@ -1,6 +1,6 @@
 {
   "name": "Plate Expectations",
-  "description": "Weekly meal planner, recipe collection with dual star ratings for Aatish & Faeeza, optional breakfast & lunch planning, grocery list with store & expiry tracking, and Google Calendar export.",
+  "description": "Weekly meal planner, recipe collection with dual star ratings for two users, optional breakfast & lunch planning, grocery list with store & expiry tracking, and Google Calendar export.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
